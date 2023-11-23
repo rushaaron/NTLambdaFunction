@@ -22,7 +22,6 @@ dependencies {
     implementation ("software.amazon.awssdk:bom:2.21.28")
     implementation ("javax.xml.bind:jaxb-api:2.2.4")
     implementation ("com.fasterxml.jackson.core:jackson-databind:2.16.0")
-    //implementation ("com.googlecode.json-simple:json-simple:1.1.1")
 }
 
 buildscript {
