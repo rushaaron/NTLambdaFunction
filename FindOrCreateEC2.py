@@ -4,30 +4,23 @@ def lambda_handler(event, context):
     # Define the region and EC2 client
     region = 'us-east-1'
     ec2_client = boto3.client('ec2', region_name=region)
-    ec2_instance_id = None
-    
-    
-    
+
     ec2_instance_id = searchForRunningInstance(ec2_client)
-    if ec2_instance_id is not None:
-        print('Found ec2!')
-    print('printing ec2 boi: ' + str(ec2_instance_id))
-    
+
     #If ec2 is not existing, have to create a new one
-    #if ec2_instance_id is None:
-     #   print("Creating new ec2")
-      #  ec2_instance_id = createInstance(ec2_client)
+    if ec2_instance_id is None:
+        ec2_instance_id = createInstance(ec2_client)
     
     #If failed to create new EC2
     if ec2_instance_id is None: 
         return {
             'statusCode': 500,
-            'body': "Error creating EC2 instance"
+            'body': "Failed to find and create instance"
         }
     else :
         return {
             'statusCode': 200,
-            'body': f"Instance {ec2_instance_id} created successfully."
+            'body': ec2_instance_id
         }
 
 def searchForRunningInstance(ec2_client):
@@ -78,8 +71,8 @@ def createInstance(ec2_client):
     
     # Create the EC2 instance
     try:
-        print('About to create an instance.')
-        #response = ec2_client.run_instances(**instance_params)
+        print('Creating new instance')
+        response = ec2_client.run_instances(**instance_params)
         return response['Instances'][0]['InstanceId']
     except Exception as e:
         return None
