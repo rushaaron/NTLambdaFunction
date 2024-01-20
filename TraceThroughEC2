@@ -1,0 +1,194 @@
+import json
+import boto3
+import time
+
+# Given an instance_id to an EC2, will wait until the instance is running or the function timesout 
+def wait_for_ec2_creation(instance_id):
+    ec2_client = boto3.client('ec2')
+
+    timeout_seconds = 40
+    start_time = time.time()
+
+    while True:
+        response = ec2_client.describe_instances(InstanceIds=[instance_id])
+        instance_state = response['Reservations'][0]['Instances'][0]['State']['Name']
+        print('instance current state',instance_state)
+        if instance_state == 'running':
+            print(f"EC2 instance {instance_id} is now running.")
+            return True
+
+        elapsed_time = time.time() - start_time
+        if elapsed_time >= timeout_seconds:
+            print(f"Timeout reached. EC2 instance {instance_id} did not reach the 'running' state within {timeout_seconds} seconds.")
+            return False
+
+        print(f"EC2 instance {instance_id} is in '{instance_state}' state. Waiting for 3 seconds...")
+        time.sleep(3)
+
+# --- Main function for finding which EC2 to run on ---        
+def find_or_create_ec2():
+    # Define the region and EC2 client
+    region = 'us-east-1'
+    ec2_client = boto3.client('ec2', region_name=region)
+
+    ec2_instance_id = searchForRunningInstance(ec2_client)
+
+    #If ec2 is not existing, have to create a new one
+    if ec2_instance_id is None:
+        ec2_instance_id = createInstance(ec2_client)
+    
+    #If failed to create new EC2
+    return ec2_instance_id
+    
+# Search for an existing ec2
+def searchForRunningInstance(ec2_client):
+        try:
+            # Get instances with specific filters (running or pending and with tag 'Name' as 'TestFromLambda')
+            filters = [
+                {'Name': 'instance-state-name', 'Values': ['running', 'pending']},
+                {'Name': 'tag:Name', 'Values': ['TestFromLambda']}
+            ]
+
+            response = ec2_client.describe_instances(Filters=filters)
+
+            instances = []
+            for reservation in response['Reservations']:
+                for instance in reservation['Instances']:
+                    instances.append(instance)
+            if instances:
+                return instances[0]['InstanceId']
+            else:
+                print('No instances found')
+                return None
+        
+        except Exception as e:
+            print(f"Failed when fetching instances because {str(e)}")
+            return None
+
+# Creates EC2
+def createInstance(ec2_client):
+     # Define parameters for the instance
+    launch_template_params = {
+        'LaunchTemplateName': 'AMI4',
+        'Version': '1'
+    }
+
+    instance_params = {
+        'LaunchTemplate': launch_template_params,
+        'InstanceType': 't2.micro',
+        'KeyName': 'tracerEC2',  # Replace 'your-key-pair' with your key pair name
+        'MinCount': 1,
+        'MaxCount': 1,
+        'TagSpecifications': [
+            {
+                'ResourceType': 'instance',
+                'Tags': [
+                    {
+                        'Key': 'Name',
+                        'Value': 'TestFromLambda'  # Set your desired instance name here
+                    }
+                ]
+            }
+        ]
+    }
+    
+    # Create the EC2 instance
+    try:
+        print('Creating new instance')
+        response = ec2_client.run_instances(**instance_params)
+        instance_id = response['Instances'][0]['InstanceId']
+        print('instance_id maybe',instance_id)
+        # Waiting for instance to boot
+        is_ec2_running = wait_for_ec2_creation(instance_id)
+        if is_ec2_running:    
+            return instance_id
+        return None
+    except Exception as e:
+        print('failed to create',e)
+        return None
+
+# Kicks off jar on EC2 and waits for it to run. If succesful, then it should return a signed url
+def run_jar_on_ec2(instance_id):
+    ssm_client = boto3.client('ssm')
+
+    command = 'java -jar /home/ec2-user/NeuronTracerEC2-1.0-SNAPSHOT-all.jar'
+    print('instance id ',instance_id)
+    response = ssm_client.send_command(
+        InstanceIds=[instance_id],
+        DocumentName='AWS-RunShellScript',
+        Parameters={'commands': [command]}
+    )
+    print('Attempting to run trace on EC2')
+    command_id = response['Command']['CommandId']
+
+    timeout_seconds = 300
+    start_time = time.time()
+    
+    while True:
+        time.sleep(3)  # Wait for 3 seconds before checking again
+        command_status = ssm_client.get_command_invocation(
+            CommandId=command_id,
+            InstanceId=instance_id
+        )['Status']
+        
+        print('status',command_status)
+        if command_status in ['Success', 'Failed', 'TimedOut', 'Cancelled']:
+            break
+    
+        elapsed_time = time.time() - start_time
+        if elapsed_time >= timeout_seconds:
+            print('Timeout reached. Exiting the loop.')
+            break
+    
+    print(f'Command Status: {command_status}')
+    
+    # If the command was successful, you can check the output
+    if command_status == 'Success':
+        command_output = ssm_client.get_command_invocation(
+            CommandId=command_id,
+            InstanceId=instance_id
+        )['StandardOutputContent']
+        print(f'Command Output: {command_output}')
+        if 'Finished Tracing' in command_output:
+            return command_output[18:]
+    return None
+
+def lambda_handler(event, context):
+    signed_url = None
+    body_str = event['body']
+
+    # ------------------- Uploading parameters to S3 ------------------- 
+    # Initialize S3 client
+    s3 = boto3.client('s3')
+
+    # Upload the JSON string to S3
+    s3.put_object(
+        Bucket='neuron-tracer-uploads',
+        Key='parameters.json',
+        Body=body_str,
+        ContentType='application/json'
+    )
+    
+    print('Uploaded parameters to S3 bucket')
+    
+    # ------------------- Waiting for EC2 -------------------
+    instance_id = find_or_create_ec2()
+    if instance_id is not None:
+        print(f'Instance {instance_id} is running')
+        signed_url = run_jar_on_ec2(instance_id)
+    
+    
+    if signed_url:
+        return {
+            'statusCode': 200,
+            'body': {'url':signed_url}
+        }
+    
+    return {
+        'statusCode': 500,
+        'body': { 'message':'Failed to trace' }
+    }
+    
+
+    
+    
